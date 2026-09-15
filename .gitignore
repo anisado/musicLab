@@ -1,0 +1,7 @@
+.build/
+build/
+helper/venv/
+helper/dist/
+helper/build/
+*.spec
+.DS_Store
