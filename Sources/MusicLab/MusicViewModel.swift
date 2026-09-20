@@ -239,40 +239,31 @@ final class MusicViewModel: ObservableObject {
         applyTempo(analysis, source: useDrums ? "drums" : "mix", trackId: trackId)
     }
 
-    /// A manually corrected or drums-derived BPM is trusted and only takes the
-    /// beat offset; a full-mix guess is replaced by anything better. The result
-    /// is stored on the track even when no deck is playing it — that is how
-    /// batch analysis fills in the library.
+    /// A manually corrected BPM is trusted and only takes the beat offset (and
+    /// the new map when it agrees); a full-mix guess never overrides a drums
+    /// reading; anything else is replaced. The result is stored on the track
+    /// even when no deck is playing it — that is how batch analysis fills in
+    /// the library.
     private func applyTempo(_ analysis: BeatAnalysis?, source: String, trackId: String) {
         guard let analysis,
               var track = store.tracks.first(where: { $0.id == trackId })
         else { return }
-        let keep = track.bpm != nil && track.bpmSource != "mix"
-        if keep && source == "mix" && track.bpmSource == "drums" { return }
+        if source == "mix", track.bpm != nil, track.bpmSource == "drums" { return }
+        let keep = track.bpm != nil && track.bpmSource == "manual"
 
-        let map: [TempoSection]?
-        if keep {
-            map = track.bpmMap ?? (analysis.map != nil
-                && abs(analysis.bpm - track.bpm!) / track.bpm! < 0.03 ? analysis.map : nil)
-        } else {
-            map = analysis.map
-        }
+        // a map and an offset from different runs would put the grid lines
+        // between the beats, so the map always comes from this analysis
+        let bpm = keep ? track.bpm! : analysis.bpm
+        let map = keep && abs(analysis.bpm - bpm) / bpm >= 0.03 ? nil : analysis.map
         for deck in decks where deck.trackId == trackId {
-            deck.beat = BeatAnalysis(bpm: keep ? track.bpm! : analysis.bpm,
-                                     offset: analysis.offset, map: map)
+            deck.beat = BeatAnalysis(bpm: bpm, offset: analysis.offset, map: map)
         }
 
-        if !keep {
-            track.bpm = analysis.bpm
-            track.bpmSource = source
-            track.bpmMap = map
-            track.beatOffset = analysis.offset
-            store.update(track)
-        } else if (track.bpmMap == nil && map != nil) || track.beatOffset == nil {
-            track.bpmMap = track.bpmMap ?? map
-            track.beatOffset = analysis.offset
-            store.update(track)
-        }
+        track.bpm = bpm
+        if !keep { track.bpmSource = source }
+        track.bpmMap = map
+        track.beatOffset = analysis.offset
+        store.update(track)
     }
 
     /// Whether one of the current tracks is currently being separated.
