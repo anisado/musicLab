@@ -18,12 +18,14 @@ struct TrackTags: Equatable {
 /// Reads and writes file tags through `stems_tool.py tags` (mutagen) —
 /// AVFoundation can read tags but cannot write them for most formats.
 enum Tagger {
-    /// argv prefix ending in "tags": the bundled PyInstaller binary, or a
-    /// python with mutagen plus the script itself.
-    private static func helper() -> [String]? {
+    private static func helper() -> [String]? { helper("tags") }
+
+    /// argv prefix ending in `subcommand`: the bundled PyInstaller binary, or
+    /// a python from the venv plus the script itself.
+    static func helper(_ subcommand: String) -> [String]? {
         let fm = FileManager.default
         if let bundled = Bundle.main.url(forResource: "stems-tool", withExtension: nil) {
-            return [bundled.path, "tags"]
+            return [bundled.path, subcommand]
         }
         let env = ProcessInfo.processInfo.environment
         let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -45,7 +47,7 @@ enum Tagger {
         }
         guard let python = pythons.first(where: { fm.isExecutableFile(atPath: $0.path) })
         else { return nil }
-        return [python.path, script.path, "tags"]
+        return [python.path, script.path, subcommand]
     }
 
     static var available: Bool { helper() != nil }

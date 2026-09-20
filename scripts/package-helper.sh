@@ -15,6 +15,7 @@ fi
   --hidden-import demucs.separate \
   --hidden-import torchaudio \
   --hidden-import mutagen \
+  --collect-all madmom --collect-all librosa \
   --add-data "$VENV/lib/python3.11/site-packages/demucs/remote:demucs/remote" \
   helper/stems_tool.py \
   --distpath helper/dist --workpath helper/build --specpath helper

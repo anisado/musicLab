@@ -1,4 +1,5 @@
-"""Entry point: `stems-tool tags ...` handles metadata tagging, otherwise demucs."""
+"""Entry point: `stems-tool tags ...` handles metadata tagging, `stems-tool
+beats <wav> [min_bpm max_bpm]` tracks beats, otherwise demucs."""
 
 import json
 import sys
@@ -380,9 +381,55 @@ def tags_main(argv):
         sys.exit(2)
 
 
+def _beats_madmom(path, min_bpm, max_bpm):
+    """RNN onset activations decoded by a dynamic Bayesian network: the
+    tracker follows tempo changes beat by beat instead of fitting one period."""
+    from madmom.features.beats import DBNBeatTrackingProcessor, RNNBeatProcessor
+
+    activations = RNNBeatProcessor()(path)
+    tracker = DBNBeatTrackingProcessor(
+        fps=100, min_bpm=min_bpm, max_bpm=max_bpm, transition_lambda=60
+    )
+    return [float(t) for t in tracker(activations)]
+
+
+def _beats_librosa(path, min_bpm, max_bpm):
+    import librosa
+    import numpy as np
+
+    y, sr = librosa.load(path, sr=22050, mono=True)
+    onset = librosa.onset.onset_strength(y=y, sr=sr)
+    tempo, frames = librosa.beat.beat_track(
+        onset_envelope=onset, sr=sr, trim=False, units="frames"
+    )
+    times = librosa.frames_to_time(frames, sr=sr)
+    return [float(t) for t in np.asarray(times)]
+
+
+def beats_main(argv):
+    path = argv[0]
+    min_bpm = float(argv[1]) if len(argv) > 1 else 60.0
+    max_bpm = float(argv[2]) if len(argv) > 2 else 200.0
+    errors = []
+    for engine, fn in (("madmom", _beats_madmom), ("librosa", _beats_librosa)):
+        try:
+            beats = fn(path, min_bpm, max_bpm)
+        except Exception as error:  # missing package, decode failure
+            errors.append(f"{engine}: {error}")
+            continue
+        if len(beats) >= 4:
+            print(json.dumps({"engine": engine, "beats": beats}))
+            return
+        errors.append(f"{engine}: too few beats")
+    print(json.dumps({"error": "; ".join(errors)}))
+    sys.exit(1)
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "tags":
         tags_main(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "beats":
+        beats_main(sys.argv[2:])
     else:
         from demucs.separate import main
 

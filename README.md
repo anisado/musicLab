@@ -10,9 +10,11 @@ React, no server — just a SwiftUI app plus a bundled Python helper.
 - Play them with seek, volume, shuffle and repeat; tags and cover art are read
   on import
 - Waveform drawn in a canvas; click to seek, +/− to zoom up to 32×
-- Tempo detected from a spectral-flux onset envelope with comb-filter
-  autocorrelation; a tempo map follows songs that change tempo (the chip shows
-  a range), with ÷2 / ×2 octave correction and ↺ to re-detect
+- Tempo tracked beat by beat with madmom's RNN + DBN beat tracker (librosa
+  as fallback) from the helper venv; a tempo map follows songs that change
+  tempo (the chip shows a range), with ÷2 / ×2 octave correction and ↺ to
+  re-detect. Without the helper a built-in spectral-flux / autocorrelation
+  estimator is used
 - **Analyze** separates the track into vocals/drums/bass/other with Demucs —
   running on `mps`, so it uses the GPU, not just the CPU — then detects the BPM
   from the isolated drums stem, which is far cleaner than the full mix
@@ -23,7 +25,7 @@ React, no server — just a SwiftUI app plus a bundled Python helper.
 
 ```bash
 brew install python@3.11        # once
-./scripts/setup-venv.sh         # creates helper/venv with demucs + torch
+./scripts/setup-venv.sh         # creates helper/venv with demucs + torch + madmom/librosa
 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer swift run
 ```
 

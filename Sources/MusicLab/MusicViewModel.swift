@@ -227,10 +227,15 @@ final class MusicViewModel: ObservableObject {
         defer { for deck in decks where deck.trackId == trackId { deck.analysing = false } }
         let useDrums = stemsOnDisk(track).contains("drums")
         let url = useDrums ? store.stemURL(track, "drums") : store.trackURL(track)
-        let analysis = await Task.detached(priority: .utility) { () -> BeatAnalysis? in
-            guard let samples = try? decodeMono(url) else { return nil }
-            return Bpm.detect(samples)
-        }.value
+        // the python beat tracker follows tempo changes beat by beat; the
+        // built-in estimator covers machines without the helper
+        var analysis = await BeatTracker.detect(url)
+        if analysis == nil {
+            analysis = await Task.detached(priority: .utility) { () -> BeatAnalysis? in
+                guard let samples = try? decodeMono(url) else { return nil }
+                return Bpm.detect(samples)
+            }.value
+        }
         applyTempo(analysis, source: useDrums ? "drums" : "mix", trackId: trackId)
     }
 
