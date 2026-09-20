@@ -27,6 +27,8 @@ struct Track: Codable, Identifiable, Equatable {
     /// Absolute time of the first beat — persisted so the beat grid can be
     /// drawn on load without re-running detection.
     var beatOffset: Double?
+    /// Hot cue times in seconds, one slot per pad; nil = empty slot.
+    var cues: [Double?]?
     /// SHA-256 of the audio file, so re-imports of the same song are deduped.
     var hash: String?
     /// Where the file originally came from, so tag edits can be mirrored
@@ -38,6 +40,8 @@ struct Track: Codable, Identifiable, Equatable {
     var comment: String?
     var rating: Int?
 }
+
+let cueSlots = 8
 
 struct Playlist: Codable, Identifiable, Equatable {
     var id: String

@@ -5,6 +5,18 @@ import UniformTypeIdentifiers
 /// Identity colors for stems — user-configurable in Settings.
 private func stemColor(_ stem: String) -> Color { WavePrefs.stemColor(stem) }
 
+/// Hot cue pad colours, in RGB so both the SwiftUI pads and the CoreGraphics
+/// waveform markers can use them.
+private let cueRGB: [SIMD3<Double>] = [
+    SIMD3(1.0, 0.3, 0.3), SIMD3(1.0, 0.6, 0.15), SIMD3(1.0, 0.9, 0.2), SIMD3(0.3, 0.9, 0.4),
+    SIMD3(0.2, 0.8, 1.0), SIMD3(0.4, 0.5, 1.0), SIMD3(0.8, 0.4, 1.0), SIMD3(1.0, 0.45, 0.8)
+]
+
+private func cueColor(_ slot: Int) -> Color {
+    let c = cueRGB[slot % cueRGB.count]
+    return Color(red: c.x, green: c.y, blue: c.z)
+}
+
 private func clock(_ seconds: Double) -> String {
     guard seconds.isFinite else { return "0:00" }
     let total = max(0, Int(seconds))
@@ -139,6 +151,7 @@ struct ContentView: View {
                 waveformRuler
                 waveform
                 transportRow
+                cueRow
                 stemsRow
             }
             .padding(12)
@@ -237,6 +250,7 @@ struct ContentView: View {
                 time: { player.time },
                 playing: player.playing,
                 beat: deck.beat,
+                cues: deck.cues,
                 zoom: deck.zoom,
                 duration: player.duration,
                 onSeek: { deck.seek($0) },
@@ -297,6 +311,51 @@ struct ContentView: View {
                 extraControls
             }
             .buttonStyle(.plain)
+        }
+
+        /// Eight hot cue pads: an empty pad stores the current position, a
+        /// set pad jumps to it; ⌥-click or right-click clears it.
+        private var cueRow: some View {
+            let cues = deck.cues
+            return HStack(spacing: 6) {
+                ForEach(0 ..< cueSlots, id: \.self) { slot in
+                    let time = cues[slot]
+                    let color = cueColor(slot)
+                    Button {
+                        if NSEvent.modifierFlags.contains(.option) {
+                            deck.clearCue(slot)
+                        } else {
+                            deck.pressCue(slot)
+                        }
+                    } label: {
+                        VStack(spacing: 1) {
+                            Text("\(slot + 1)").font(.caption.bold())
+                            Text(time.map(clock) ?? "—")
+                                .font(.system(size: 9)).monospacedDigit()
+                                .foregroundStyle(time == nil ? .secondary : .primary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 4)
+                        .background(
+                            time == nil ? Color.white.opacity(0.06) : color.opacity(0.35),
+                            in: RoundedRectangle(cornerRadius: 6)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .strokeBorder(time == nil ? Color.white.opacity(0.12) : color.opacity(0.9), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(deck.track == nil)
+                    .help(time == nil ? "set cue \(slot + 1) at the playhead" : "jump to cue \(slot + 1) — ⌥-click to clear")
+                    .contextMenu {
+                        if time != nil {
+                            Button("Clear cue \(slot + 1)") { deck.clearCue(slot) }
+                        }
+                        Button("Set cue \(slot + 1) here") { deck.setCue(slot, at: deck.progress) }
+                    }
+                }
+            }
         }
 
         /// Round filled transport button — the visual anchor of the deck.
@@ -622,6 +681,7 @@ private struct WaveformView: View {
     let time: () -> Double
     let playing: Bool
     let beat: BeatAnalysis?
+    let cues: [Double?]
     let zoom: Double
     let duration: Double
     let onSeek: (Double) -> Void
@@ -747,6 +807,7 @@ private struct WaveformView: View {
         let beat = AppPrefs.beatGrid ? beat : nil
         let key = stripKey(span: span, size: size, sources: sources,
                            freq: freq, stacked: stacked, gridOn: beat != nil)
+        let cueTimes = cues
         guard strip.key != key || from - strip.from < span * 0.5
                 || strip.from + strip.span - to < span * 0.5,
               !strip.rendering else { return }
@@ -767,7 +828,7 @@ private struct WaveformView: View {
                 widthPoints: widthPoints, heightPoints: size.height,
                 scale: scale, from: stripFrom, span: stripSpan,
                 duration: duration, sources: sources,
-                freq: freq, stacked: stacked, beat: beat
+                freq: freq, stacked: stacked, beat: beat, cues: cueTimes
             )
             await MainActor.run {
                 strip.image = image
@@ -793,7 +854,8 @@ private struct WaveformView: View {
     ) -> String {
         var key = "\(span)|\(size.width)x\(size.height)"
         key += "|\(freq.low)|\(freq.midLow)|\(freq.midHigh)|\(freq.high)|\(stacked)|\(gridOn)"
-        key += "|beat:\(beat?.bpm ?? 0):\(beat?.map?.count ?? 0)"
+        key += "|beat:\(beat?.bpm ?? 0):\(beat?.offset ?? 0):\(beat?.map?.map { "\($0.start)/\($0.bpm)/\($0.phase ?? -1)" }.joined(separator: ",") ?? "")"
+        key += "|cues:\(cues.map { $0.map { "\($0)" } ?? "-" }.joined(separator: ","))"
         for source in sources {
             key += "|\(source.peaks.count):\(source.peaks.first ?? 0):\(source.gain):\(source.color?.description ?? "-")"
         }
@@ -815,7 +877,8 @@ private struct WaveformView: View {
         freq: (low: SIMD3<Double>, midLow: SIMD3<Double>,
                midHigh: SIMD3<Double>, high: SIMD3<Double>),
         stacked: Bool,
-        beat: BeatAnalysis?
+        beat: BeatAnalysis?,
+        cues: [Double?]
     ) -> CGImage? {
         let width = Int(widthPoints * scale)
         let pixelHeight = Int(heightPoints * scale)
@@ -963,6 +1026,29 @@ private struct WaveformView: View {
                     NSGraphicsContext.restoreGraphicsState()
                 }
             }
+        }
+
+        // hot cue markers: a coloured line with a numbered flag at the top
+        for (slot, time) in cues.enumerated() {
+            guard let time, time >= from, time <= from + span else { continue }
+            let x = CGFloat((time - from) / span) * CGFloat(width)
+            let c = cueRGB[slot % cueRGB.count]
+            let color = CGColor(red: c.x, green: c.y, blue: c.z, alpha: 1)
+            context.setFillColor(color)
+            context.fill(CGRect(x: x - scale, y: 0, width: 2 * scale, height: CGFloat(pixelHeight)))
+            let flag = CGRect(x: x, y: 0, width: 14 * scale, height: 13 * scale)
+            context.fill(flag)
+            let label = NSAttributedString(
+                string: "\(slot + 1)",
+                attributes: [
+                    .font: NSFont.boldSystemFont(ofSize: 9 * scale),
+                    .foregroundColor: NSColor.black.withAlphaComponent(0.85)
+                ]
+            )
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+            label.draw(at: NSPoint(x: x + 4 * scale, y: 1 * scale))
+            NSGraphicsContext.restoreGraphicsState()
         }
         return context.makeImage()
     }

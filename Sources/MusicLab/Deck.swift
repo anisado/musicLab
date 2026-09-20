@@ -92,7 +92,6 @@ final class Deck: ObservableObject, Identifiable {
         stemPeaks = nil
         stemBands = nil
         strip.image = nil
-        strip.key = ""
         mix = [:]
         zoom = 32
         progress = 0
@@ -206,6 +205,43 @@ final class Deck: ObservableObject, Identifiable {
         track.bpmSource = "manual"
         if let scaledMap { track.bpmMap = scaledMap }
         store?.update(track)
+    }
+
+    // MARK: - hot cues
+
+    /// The track's cue slots padded to `cueSlots`.
+    var cues: [Double?] {
+        var slots = track?.cues ?? []
+        if slots.count < cueSlots { slots += Array(repeating: nil, count: cueSlots - slots.count) }
+        return Array(slots.prefix(cueSlots))
+    }
+
+    /// Pad press: an empty slot is set at the current position, a set one
+    /// jumps there (and keeps playing if the deck was playing).
+    func pressCue(_ slot: Int) {
+        if let time = cues[slot] {
+            seek(time)
+        } else {
+            setCue(slot, at: player.playing ? player.time : progress)
+        }
+    }
+
+    func setCue(_ slot: Int, at time: Double) {
+        guard var track, slot < cueSlots else { return }
+        var slots = cues
+        slots[slot] = min(max(time, 0), player.duration)
+        track.cues = slots
+        store?.update(track)
+        objectWillChange.send()
+    }
+
+    func clearCue(_ slot: Int) {
+        guard var track, slot < cueSlots, cues[slot] != nil else { return }
+        var slots = cues
+        slots[slot] = nil
+        track.cues = slots.allSatisfy { $0 == nil } ? nil : slots
+        store?.update(track)
+        objectWillChange.send()
     }
 
     // MARK: - stems
