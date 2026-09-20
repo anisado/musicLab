@@ -36,6 +36,7 @@ enum BeatTracker {
                   let reply = try? JSONDecoder().decode(Reply.self, from: data),
                   let beats = reply.beats
             else { return nil }
+            NSLog("beat tracker: %@ found %d beats", reply.engine ?? "?", beats.count)
             return analysis(beats: beats)
         }.value
     }

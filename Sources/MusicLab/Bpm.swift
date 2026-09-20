@@ -404,6 +404,74 @@ enum Bpm {
         return (lag, beats[0])
     }
 
+    /// Kick onsets per millisecond: the low band, rectified, smoothed, and
+    /// half-wave differentiated so only energy rises count.
+    private static func kickOnsets(_ samples: [Float]) -> [Double] {
+        let rc = 1 / (2 * Double.pi * 150)
+        let a = Float((1 / rate) / (rc + 1 / rate))
+        var prev: Float = 0
+        var envelope = [Double](repeating: 0, count: Int(Double(samples.count) * 1000 / rate) + 1)
+        for k in samples.indices {
+            prev += a * (samples[k] - prev)
+            let i = Int(Double(k) * 1000 / rate)
+            envelope[i] = max(envelope[i], Double(abs(prev)))
+        }
+        var smooth = envelope
+        for i in 1 ..< smooth.count { smooth[i] = max(envelope[i], smooth[i - 1] * 0.9) }
+        var onsets = [Double](repeating: 0, count: smooth.count)
+        for i in 1 ..< smooth.count { onsets[i] = max(0, smooth[i] - smooth[i - 1]) }
+        return onsets
+    }
+
+    /// Shift the grid so its lines sit on the kick hits the waveform shows.
+    /// Every phase within one period is tried and the shift is only taken
+    /// when it clearly beats the tracker's own phase — so an offbeat or a
+    /// constant lag gets corrected while syncopated grooves keep their beat.
+    static func refinePhase(_ analysis: BeatAnalysis, samples: [Float]) -> BeatAnalysis {
+        let onsets = kickOnsets(samples)
+        guard onsets.count > 2000 else { return analysis }
+        let duration = Double(onsets.count) / 1000
+        let beats = analysis.beats(from: 0, to: duration).map(\.time)
+        guard beats.count >= 8 else { return analysis }
+        let period = 60 / analysis.bpm
+
+        func score(_ shift: Double) -> Double {
+            var total = 0.0
+            for beat in beats {
+                let centre = Int((beat + shift) * 1000)
+                let lo = max(0, centre - 12), hi = min(onsets.count - 1, centre + 12)
+                guard lo <= hi else { continue }
+                var best = 0.0
+                for i in lo ... hi { best = max(best, onsets[i]) }
+                total += best
+            }
+            return total
+        }
+
+        let steps = max(Int(period * 1000 / 4), 1)
+        let current = score(0)
+        var bestShift = 0.0, bestScore = current
+        for step in 0 ..< steps {
+            let shift = -period / 2 + period * Double(step) / Double(steps)
+            let value = score(shift)
+            if value > bestScore { bestScore = value; bestShift = shift }
+        }
+        // a small correction is always cheap; jumping to another phase of
+        // the bar needs a clear win over where the tracker put the beat
+        let small = abs(bestShift) < period * 0.15
+        guard bestShift != 0, small || bestScore > current * 1.35 else { return analysis }
+
+        var refined = analysis
+        refined.offset = ((analysis.offset + bestShift).truncatingRemainder(dividingBy: period) + period)
+            .truncatingRemainder(dividingBy: period)
+        refined.map = analysis.map?.map { section in
+            var section = section
+            if let phase = section.phase { section.phase = phase + bestShift }
+            return section
+        }
+        return refined
+    }
+
     /// Estimate the tempo of decoded mono samples (at `rate`), with the offset
     /// of the first beat and a tempo map when the tempo changes inside the
     /// track. Nil when there is no clear beat.

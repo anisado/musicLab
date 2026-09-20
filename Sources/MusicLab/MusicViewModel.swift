@@ -229,13 +229,14 @@ final class MusicViewModel: ObservableObject {
         let url = useDrums ? store.stemURL(track, "drums") : store.trackURL(track)
         // the python beat tracker follows tempo changes beat by beat; the
         // built-in estimator covers machines without the helper
-        var analysis = await BeatTracker.detect(url)
-        if analysis == nil {
-            analysis = await Task.detached(priority: .utility) { () -> BeatAnalysis? in
-                guard let samples = try? decodeMono(url) else { return nil }
-                return Bpm.detect(samples)
-            }.value
-        }
+        let tracked = await BeatTracker.detect(url)
+        let analysis = await Task.detached(priority: .utility) { () -> BeatAnalysis? in
+            guard let samples = try? decodeMono(url) else { return tracked }
+            guard let found = tracked ?? Bpm.detect(samples) else { return nil }
+            // whichever tracker ran, the grid is lined up with the kick
+            // hits the waveform actually shows
+            return Bpm.refinePhase(found, samples: samples)
+        }.value
         applyTempo(analysis, source: useDrums ? "drums" : "mix", trackId: trackId)
     }
 
