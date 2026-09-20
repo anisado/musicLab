@@ -223,35 +223,28 @@ struct ContentView: View {
             }
         }
 
+        /// The strip scrolls inside an AppKit layer driven by a display link,
+        /// so no SwiftUI update happens per frame — this view only rebuilds
+        /// when something about the deck (track, mix, zoom, play state) changes.
         private var waveform: some View {
-            Group {
-                if deck.player.playing {
-                    TimelineView(.animation) { _ in
-                        waveformView(progress: deck.player.time)
-                    }
-                } else {
-                    waveformView(progress: deck.player.time)
-                }
-            }
-            .frame(height: model.dualDeck ? 110 : 160)
-        }
-
-        private func waveformView(progress: Double) -> WaveformView {
-            WaveformView(
+            let player = deck.player
+            return WaveformView(
                 peaks: deck.peaks,
                 bands: deck.bands,
                 stemPeaks: deck.stemPeaks,
                 stemBands: deck.stemBands,
                 mix: deck.mix,
-                progress: progress,
+                time: { player.time },
+                playing: player.playing,
                 beat: deck.beat,
                 zoom: deck.zoom,
-                duration: deck.player.duration,
+                duration: player.duration,
                 onSeek: { deck.seek($0) },
                 onZoom: { deck.zoom = $0 },
                 strip: deck.strip,
                 onStripReady: { deck.objectWillChange.send() }
             )
+            .frame(height: model.dualDeck ? 110 : 160)
         }
 
         private var tempoLabel: String {
@@ -625,7 +618,9 @@ private struct WaveformView: View {
     let stemPeaks: [String: [Float]]?
     let stemBands: [String: BandEnvelope]?
     let mix: [String: StemMix]
-    let progress: Double
+    /// Current playhead time, read at display rate by the scrolling layer.
+    let time: () -> Double
+    let playing: Bool
     let beat: BeatAnalysis?
     let zoom: Double
     let duration: Double
@@ -637,32 +632,28 @@ private struct WaveformView: View {
     let onStripReady: () -> Void
     @State private var pinchStart: Double = 1
 
+    /// Seconds visible across the view.
+    private var span: Double { duration / zoom }
+
     /// Window always centered on the playhead, like a DJ deck: the playhead
     /// stays fixed mid-view and the waveform scrolls under it, with empty
     /// space before 0:00 and after the end.
-    private var window: (from: Double, to: Double) {
-        let span = duration / zoom
+    private func window(at progress: Double) -> (from: Double, to: Double) {
         let from = progress - span / 2
         return (from, from + span)
     }
 
-    private var playheadX: CGFloat { 0.5 }
-
     var body: some View {
         GeometryReader { geometry in
-            let _ = refreshStrip(size: geometry.size)
-            ZStack(alignment: .topLeading) {
-                if strip.image == nil {
-                    Rectangle()
-                        .fill(Color.secondary.opacity(0.35))
-                        .frame(width: geometry.size.width, height: 0.5)
-                        .offset(y: geometry.size.height / 2)
-                }
-                stripImage(in: geometry.size)
-                PlayheadView(position: playheadX)
-                    .allowsHitTesting(false)
-            }
-            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
+            let _ = refreshStrip(size: geometry.size, progress: time())
+            WaveformStrip(
+                strip: strip,
+                span: span,
+                playing: playing,
+                time: time,
+                onNeedsStrip: { progress in refreshStrip(size: geometry.size, progress: progress) }
+            )
+            .frame(width: geometry.size.width, height: geometry.size.height)
             .clipped()
             .contentShape(Rectangle())
             .simultaneousGesture(
@@ -677,7 +668,7 @@ private struct WaveformView: View {
             .simultaneousGesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        let (from, to) = window
+                        let (from, to) = window(at: time())
                         let span = to - from
                         guard span > 0 else { return }
                         let width = geometry.size.width
@@ -695,42 +686,12 @@ private struct WaveformView: View {
         )
     }
 
-    /// The strip bitmap laid out at its natural scale and moved by `offset` —
-    /// once rasterized into a layer the compositor glides it on the GPU, so a
-    /// frame is just a layer-position change with no draw work at all.
-    @ViewBuilder
-    private func stripImage(in size: CGSize) -> some View {
-        if let image = strip.image {
-            let span = window.to - window.from
-            let w = strip.span / span * size.width
-            // the strip is five windows wide — pin it inside a view-sized
-            // frame so it cannot grow the ZStack (which would then be
-            // centered, shifting the strip and playhead by two windows)
-            Image(decorative: image, scale: strip.scale)
-                .resizable()
-                .frame(width: w, height: size.height)
-                .offset(x: stripOffsetX(size: size))
-                .frame(width: size.width, height: size.height, alignment: .leading)
-        }
-    }
-
-    /// Offset of the strip's left edge: sub-pixel while the playhead moves so
-    /// the layer glides, snapped to device pixels when still so a paused
-    /// waveform stays pixel-crisp instead of resampling soft.
-    private func stripOffsetX(size: CGSize) -> CGFloat {
-        let (from, to) = window
-        let exact = (strip.from - from) / (to - from) * size.width
-        let moving = abs(progress - strip.lastProgress) > 0.0001
-        strip.lastProgress = progress
-        return moving ? exact : (exact * strip.scale).rounded() / strip.scale
-    }
-
     /// Work out which stems are audible and kick off a background strip
     /// re-render when the visible window drifts near the strip's edge or
     /// anything in the render key changed. Mutating `strip` is safe — it is
     /// a reference-type cache, not view state.
-    private func refreshStrip(size: CGSize) {
-        let (from, to) = window
+    private func refreshStrip(size: CGSize, progress: Double) {
+        let (from, to) = window(at: progress)
         let span = to - from
         guard span > 0, duration > 0 else {
             strip.image = nil
@@ -1868,21 +1829,160 @@ final class StripCache {
     var scale: CGFloat = 2
     var key = ""
     var rendering = false
-    var lastProgress = -1.0
 }
 
-private struct PlayheadView: View {
-    /// Horizontal position as a fraction of the width — 0.5 while the
-    /// waveform scrolls, off-center inside the clamped end regions.
-    var position: CGFloat = 0.5
+/// The scrolling part of the waveform: an AppKit view whose display link
+/// moves a bitmap layer under a fixed playhead every frame. SwiftUI is not
+/// involved per frame — only when the strip, span or play state changes.
+private struct WaveformStrip: NSViewRepresentable {
+    let strip: StripCache
+    let span: Double
+    let playing: Bool
+    let time: () -> Double
+    /// Fired from the display link when the window nears the strip's edge so
+    /// the owner can render the next strip in the background.
+    let onNeedsStrip: (Double) -> Void
 
-    var body: some View {
-        GeometryReader { geometry in
-            Rectangle()
-                .fill(Color.red)
-                .frame(width: 1.5, height: geometry.size.height)
-                .shadow(color: .red, radius: 4)
-                .offset(x: (geometry.size.width - 1.5) * position)
+    func makeNSView(context: Context) -> WaveformStripView {
+        WaveformStripView()
+    }
+
+    func updateNSView(_ view: WaveformStripView, context: Context) {
+        view.strip = strip
+        view.span = span
+        view.time = time
+        view.onNeedsStrip = onNeedsStrip
+        view.playing = playing
+        view.render()
+    }
+}
+
+final class WaveformStripView: NSView {
+    var strip = StripCache()
+    var span = 1.0
+    var time: () -> Double = { 0 }
+    var onNeedsStrip: (Double) -> Void = { _ in }
+    var playing = false { didSet { syncDisplayLink() } }
+
+    private let stripLayer = CALayer()
+    private let baseline = CALayer()
+    private let playhead = CALayer()
+    private var link: CADisplayLink?
+    private var lastProgress = -1.0
+    private var shownImage: CGImage?
+
+    override var isFlipped: Bool { true }
+
+    /// Purely visual — clicks, drags and pinches belong to the SwiftUI
+    /// gestures layered on top.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .never
+        guard let layer else { return }
+        layer.masksToBounds = true
+        // implicit animations would lag every frame behind the playhead
+        let still: [String: CAAction] = [
+            "position": NSNull(), "bounds": NSNull(), "contents": NSNull(),
+            "hidden": NSNull(), "frame": NSNull(), "contentsScale": NSNull()
+        ]
+        stripLayer.actions = still
+        stripLayer.anchorPoint = .zero
+        stripLayer.contentsGravity = .resize
+        stripLayer.magnificationFilter = .linear
+        stripLayer.minificationFilter = .linear
+        baseline.actions = still
+        baseline.backgroundColor = NSColor.secondaryLabelColor.withAlphaComponent(0.35).cgColor
+        playhead.actions = still
+        playhead.backgroundColor = NSColor.red.cgColor
+        playhead.shadowColor = NSColor.red.cgColor
+        playhead.shadowOpacity = 1
+        playhead.shadowRadius = 4
+        playhead.shadowOffset = .zero
+        layer.addSublayer(stripLayer)
+        layer.addSublayer(baseline)
+        layer.addSublayer(playhead)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        syncDisplayLink()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        render()
+    }
+
+    override func layout() {
+        super.layout()
+        render()
+    }
+
+    private func syncDisplayLink() {
+        if playing, window != nil {
+            guard link == nil else { return }
+            let link = displayLink(target: self, selector: #selector(tick))
+            link.add(to: .main, forMode: .common)
+            self.link = link
+        } else {
+            link?.invalidate()
+            link = nil
+            render()
+        }
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        render()
+    }
+
+    /// Lay the strip out for the current playhead: one layer frame update,
+    /// sub-pixel while moving so it glides, pixel-snapped when still so a
+    /// paused waveform stays crisp.
+    func render() {
+        let progress = time()
+        let width = bounds.width
+        let height = bounds.height
+        guard width > 0, height > 0, span > 0 else { return }
+        let scale = window?.backingScaleFactor ?? strip.scale
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+
+        playhead.frame = CGRect(x: ((width - 1.5) / 2 * scale).rounded() / scale, y: 0, width: 1.5, height: height)
+        baseline.frame = CGRect(x: 0, y: (height / 2 * scale).rounded() / scale, width: width, height: 1 / scale)
+
+        guard let image = strip.image, strip.span > 0 else {
+            stripLayer.isHidden = true
+            baseline.isHidden = false
+            return
+        }
+        stripLayer.isHidden = false
+        baseline.isHidden = true
+        if shownImage !== image {
+            shownImage = image
+            stripLayer.contents = image
+            stripLayer.contentsScale = strip.scale
+        }
+        let from = progress - span / 2
+        let w = strip.span / span * width
+        let exact = (strip.from - from) / span * width
+        let moving = abs(progress - lastProgress) > 0.0001
+        lastProgress = progress
+        let x = moving ? exact : (exact * scale).rounded() / scale
+        stripLayer.frame = CGRect(x: x, y: 0, width: w, height: height)
+
+        // ask for a fresh strip once the window drifts within half a span
+        // of either edge of the current one
+        if !strip.rendering,
+           from - strip.from < span * 0.5 || strip.from + strip.span - (from + span) < span * 0.5 {
+            onNeedsStrip(progress)
         }
     }
 }
