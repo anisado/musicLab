@@ -210,7 +210,9 @@ final class Deck: ObservableObject, Identifiable {
 
     // MARK: - stems
 
-    /// One click: separate the stems if needed, then read the tempo off the drums.
+    /// One click: read the tempo off the full mix right away so the deck has a
+    /// BPM within seconds, separate the stems, then re-read it off the drums.
+    /// Tracks that already have stems just get the drums reading.
     func analyse(force: Bool = false) {
         guard let track else { return }
         if separated, !force {
@@ -219,7 +221,10 @@ final class Deck: ObservableObject, Identifiable {
             return
         }
         pendingTempo = true
-        Task { await runSeparation(track) }
+        Task {
+            if !separated { await detectTempo() }
+            await runSeparation(track)
+        }
     }
 
     private func runSeparation(_ track: Track) async {

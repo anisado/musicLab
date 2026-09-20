@@ -1868,8 +1868,13 @@ final class WaveformStripView: NSView {
     private let baseline = CALayer()
     private let playhead = CALayer()
     private var link: CADisplayLink?
-    private var lastProgress = -1.0
     private var shownImage: CGImage?
+    /// Geometry the running glide animation was built for — any change
+    /// means the animation has to be rebuilt.
+    private var glide: (image: CGImage, width: CGFloat, height: CGFloat, span: Double)?
+    private static let glideKey = "glide"
+    /// Long enough that a glide never runs out mid-track.
+    private static let glideSeconds = 4 * 3600.0
 
     override var isFlipped: Bool { true }
 
@@ -1941,9 +1946,12 @@ final class WaveformStripView: NSView {
         render()
     }
 
-    /// Lay the strip out for the current playhead: one layer frame update,
-    /// sub-pixel while moving so it glides, pixel-snapped when still so a
-    /// paused waveform stays crisp.
+    /// Lay the strip out for the current playhead. While playing the strip is
+    /// moved by a linear Core Animation glide — the render server advances it
+    /// every display refresh regardless of what the main thread is doing, so
+    /// it cannot stutter; the display link only re-anchors the glide when the
+    /// audio clock has drifted from it (seek, latency change). Paused, the
+    /// strip is pixel-snapped so it stays crisp.
     func render() {
         let progress = time()
         let width = bounds.width
@@ -1973,10 +1981,23 @@ final class WaveformStripView: NSView {
         let from = progress - span / 2
         let w = strip.span / span * width
         let exact = (strip.from - from) / span * width
-        let moving = abs(progress - lastProgress) > 0.0001
-        lastProgress = progress
-        let x = moving ? exact : (exact * scale).rounded() / scale
-        stripLayer.frame = CGRect(x: x, y: 0, width: w, height: height)
+
+        if playing {
+            let sameGeometry = glide.map {
+                $0.image === image && $0.width == width && $0.height == height && $0.span == span
+            } ?? false
+            let running = stripLayer.animation(forKey: Self.glideKey) != nil
+            let shown = stripLayer.presentation()?.position.x ?? exact
+            if !sameGeometry || !running || abs(shown - exact) > 1.5 {
+                startGlide(from: exact, width: w, height: height, pixelsPerSecond: width / span)
+                glide = (image, width, height, span)
+            }
+        } else {
+            stripLayer.removeAnimation(forKey: Self.glideKey)
+            glide = nil
+            let x = (exact * scale).rounded() / scale
+            stripLayer.frame = CGRect(x: x, y: 0, width: w, height: height)
+        }
 
         // ask for a fresh strip once the window drifts within half a span
         // of either edge of the current one
@@ -1984,6 +2005,21 @@ final class WaveformStripView: NSView {
            from - strip.from < span * 0.5 || strip.from + strip.span - (from + span) < span * 0.5 {
             onNeedsStrip(progress)
         }
+    }
+
+    private func startGlide(from x: CGFloat, width w: CGFloat, height: CGFloat, pixelsPerSecond: CGFloat) {
+        stripLayer.removeAnimation(forKey: Self.glideKey)
+        let end = x - pixelsPerSecond * Self.glideSeconds
+        stripLayer.bounds = CGRect(x: 0, y: 0, width: w, height: height)
+        stripLayer.position = CGPoint(x: end, y: 0)
+        let animation = CABasicAnimation(keyPath: "position.x")
+        animation.fromValue = x
+        animation.toValue = end
+        animation.duration = Self.glideSeconds
+        animation.timingFunction = CAMediaTimingFunction(name: .linear)
+        animation.isRemovedOnCompletion = false
+        animation.fillMode = .forwards
+        stripLayer.add(animation, forKey: Self.glideKey)
     }
 }
 

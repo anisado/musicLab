@@ -360,6 +360,50 @@ enum Bpm {
         }
     }
 
+    /// Mean onset energy the grid lands on when it is offset from the tracked
+    /// beats by `fraction` of a period.
+    private static func gridEnergy(_ envelope: [Double], beats: [Double], lag: Double, fraction: Double) -> Double {
+        guard !beats.isEmpty else { return 0 }
+        return beats.map { at(envelope, $0 + lag * fraction) }.reduce(0, +) / Double(beats.count)
+    }
+
+    /// Beat tracking cannot tell a tempo from its half or double: both grids
+    /// land on real onsets. The offbeats decide it — hits between the tracked
+    /// beats that are nearly as strong mean the real beat is twice as fast;
+    /// every other tracked beat being weak means it is half as fast.
+    private static func resolveOctave(_ envelope: [Double], beats: [Double], lag: Double)
+        -> (lag: Double, offset: Double)
+    {
+        let bpm = fps * 60 / lag
+        let onBeat = gridEnergy(envelope, beats: beats, lag: lag, fraction: 0)
+        guard onBeat > 0 else { return (lag, beats[0]) }
+
+        if bpm * 2 <= maxBpm, bpm < preferred {
+            let offBeat = gridEnergy(envelope, beats: beats, lag: lag, fraction: 0.5)
+            let quarter = max(gridEnergy(envelope, beats: beats, lag: lag, fraction: 0.25),
+                              gridEnergy(envelope, beats: beats, lag: lag, fraction: 0.75))
+            // offbeats carry the beat, and the quarter positions do not — so
+            // this is not just a dense hi-hat pattern
+            if offBeat / onBeat > 0.75, quarter / onBeat < 0.6 {
+                return (lag / 2, beats[0])
+            }
+        }
+
+        if bpm / 2 >= minBpm, bpm > preferred * 1.2, beats.count >= 8 {
+            var even = 0.0, odd = 0.0
+            for (index, beat) in beats.enumerated() {
+                if index % 2 == 0 { even += at(envelope, beat) } else { odd += at(envelope, beat) }
+            }
+            even /= Double((beats.count + 1) / 2)
+            odd /= Double(beats.count / 2)
+            let strong = max(even, odd), weak = min(even, odd)
+            if strong > 0, weak / strong < 0.3 {
+                return (lag * 2, even >= odd ? beats[0] : beats[1])
+            }
+        }
+        return (lag, beats[0])
+    }
+
     /// Estimate the tempo of decoded mono samples (at `rate`), with the offset
     /// of the first beat and a tempo map when the tempo changes inside the
     /// track. Nil when there is no clear beat.
@@ -393,13 +437,17 @@ enum Bpm {
 
         var offsetFrame = 0.0
         if beatFrames.count >= 2 {
-            // the median inter-beat interval is a cleaner period estimate than
-            // the correlation peak — it is measured on the actual beat grid
-            var intervals: [Double] = []
-            for i in 1 ..< beatFrames.count { intervals.append(beatFrames[i] - beatFrames[i - 1]) }
-            intervals.sort()
-            lag = intervals[intervals.count / 2]
+            // beats sit on whole frames, so any single interval is quantised
+            // to ~1.5% at 128 BPM; averaging the regular intervals of the
+            // whole grid reads the period to a fraction of a frame
+            var sum = 0.0, count = 0
+            for i in 1 ..< beatFrames.count {
+                let interval = beatFrames[i] - beatFrames[i - 1]
+                if abs(interval / lag - 1) <= 0.15 { sum += interval; count += 1 }
+            }
+            if count > 0 { lag = sum / Double(count) }
             offsetFrame = beatFrames[0]
+            (lag, offsetFrame) = resolveOctave(envelope, beats: beatFrames, lag: lag)
         } else {
             let grid = alignGrid(envelope, lag: lag)
             lag = grid.lag
