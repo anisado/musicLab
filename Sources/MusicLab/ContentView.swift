@@ -1979,8 +1979,8 @@ final class WaveformStripView: NSView {
             stripLayer.contentsScale = strip.scale
         }
         let from = progress - span / 2
-        let w = strip.span / span * width
-        let exact = (strip.from - from) / span * width
+        let w: CGFloat = CGFloat(strip.span / span) * width
+        let exact: CGFloat = CGFloat((strip.from - from) / span) * width
 
         if playing {
             let sameGeometry = glide.map {
@@ -1989,7 +1989,7 @@ final class WaveformStripView: NSView {
             let running = stripLayer.animation(forKey: Self.glideKey) != nil
             let shown = stripLayer.presentation()?.position.x ?? exact
             if !sameGeometry || !running || abs(shown - exact) > 1.5 {
-                startGlide(from: exact, width: w, height: height, pixelsPerSecond: width / span)
+                startGlide(from: exact, width: w, height: height, pixelsPerSecond: width / CGFloat(span))
                 glide = (image, width, height, span)
             }
         } else {
@@ -2009,7 +2009,7 @@ final class WaveformStripView: NSView {
 
     private func startGlide(from x: CGFloat, width w: CGFloat, height: CGFloat, pixelsPerSecond: CGFloat) {
         stripLayer.removeAnimation(forKey: Self.glideKey)
-        let end = x - pixelsPerSecond * Self.glideSeconds
+        let end = x - pixelsPerSecond * CGFloat(Self.glideSeconds)
         stripLayer.bounds = CGRect(x: 0, y: 0, width: w, height: height)
         stripLayer.position = CGPoint(x: end, y: 0)
         let animation = CABasicAnimation(keyPath: "position.x")
