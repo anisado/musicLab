@@ -670,7 +670,7 @@ private struct WaveformView: View {
                 PlayheadView(position: playheadX)
                     .allowsHitTesting(false)
             }
-            .frame(width: geometry.size.width, height: geometry.size.height)
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
             .clipped()
             .contentShape(Rectangle())
             .simultaneousGesture(
@@ -711,10 +711,14 @@ private struct WaveformView: View {
         if let image = strip.image {
             let span = window.to - window.from
             let w = strip.span / span * size.width
+            // the strip is five windows wide — pin it inside a view-sized
+            // frame so it cannot grow the ZStack (which would then be
+            // centered, shifting the strip and playhead by two windows)
             Image(decorative: image, scale: strip.scale)
                 .resizable()
                 .frame(width: w, height: size.height)
                 .offset(x: stripOffsetX(size: size))
+                .frame(width: size.width, height: size.height, alignment: .leading)
         }
     }
 
