@@ -637,24 +637,16 @@ private struct WaveformView: View {
     let onStripReady: () -> Void
     @State private var pinchStart: Double = 1
 
-    /// Window centered on the playhead but clamped to the track — at the
-    /// start and end the playhead travels inside a still window instead of
-    /// half the view showing dead space beyond the track.
+    /// Window always centered on the playhead, like a DJ deck: the playhead
+    /// stays fixed mid-view and the waveform scrolls under it, with empty
+    /// space before 0:00 and after the end.
     private var window: (from: Double, to: Double) {
         let span = duration / zoom
-        var from = progress - span / 2
-        if from < 0 { from = 0 }
-        if from + span > duration { from = max(0, duration - span) }
+        let from = progress - span / 2
         return (from, from + span)
     }
 
-    /// Playhead position inside the window — 0.5 while scrolling, off-center
-    /// inside the clamped regions at the track edges.
-    private var playheadX: CGFloat {
-        let (from, to) = window
-        guard to > from else { return 0.5 }
-        return CGFloat((progress - from) / (to - from))
-    }
+    private var playheadX: CGFloat { 0.5 }
 
     var body: some View {
         GeometryReader { geometry in
@@ -977,7 +969,7 @@ private struct WaveformView: View {
         if let beat {
             let pixelWidth = CGFloat(width)
             let barSpacing = ((60 / beat.bpm) * 4 / span) * pixelWidth
-            for (time, index) in beat.beats(from: from, to: from + span) {
+            for (time, index) in beat.beats(from: from, to: min(from + span, duration)) {
                 let x = CGFloat((time - from) / span) * pixelWidth
                 let downbeat = index % 4 == 0
                 context.setStrokeColor(CGColor(
@@ -1839,8 +1831,9 @@ private struct MetadataTable: NSViewRepresentable {
 /// The loudest envelope bucket within a column's time range, so heights
 /// stay stable while scrolling.
 private func columnMax(_ envelope: [Float], _ t0: Double, _ t1: Double, _ perSecond: Double) -> Float {
-    // the strip runs three windows wide, so columns can land fully past the
-    // end of the track — clamp i0 or i0..<i1 traps
+    // the strip runs several windows wide, so columns can land fully before
+    // the start or past the end of the track — those are silence
+    guard t1 > 0, t0 * perSecond < Double(envelope.count) else { return 0 }
     let i0 = min(envelope.count, max(0, Int(t0 * perSecond)))
     let i1 = min(envelope.count, max(i0 + 1, Int((t1 * perSecond).rounded(.up))))
     var peak: Float = 0
@@ -1854,6 +1847,7 @@ private func columnMax(_ envelope: [Float], _ t0: Double, _ t1: Double, _ perSec
 /// the mix reflects the column's actual spectral balance, not coincidental
 /// per-band peaks.
 private func columnMean(_ envelope: [Float], _ t0: Double, _ t1: Double, _ perSecond: Double) -> Float {
+    guard t1 > 0, t0 * perSecond < Double(envelope.count) else { return 0 }
     let i0 = max(0, Int(t0 * perSecond))
     let i1 = min(envelope.count, max(i0 + 1, Int((t1 * perSecond).rounded(.up))))
     guard i1 > i0 else { return 0 }

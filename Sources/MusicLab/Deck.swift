@@ -56,18 +56,15 @@ final class Deck: ObservableObject, Identifiable {
         return model?.stemsOnDisk(track) ?? []
     }
 
-    /// Visible window centered on the playhead but clamped to the track —
-    /// near the start and end the playhead travels inside a still window
-    /// instead of the view showing dead space beyond the track. Matches
-    /// `WaveformView.window`.
+    /// Visible window, always centered on the fixed playhead. Matches
+    /// `WaveformView.window`; the ends are clamped to the track only for the
+    /// ruler labels.
     var waveformWindow: (from: Double, to: Double) {
         let duration = player.duration
         guard duration > 0 else { return (0, 0) }
         let span = duration / zoom
-        var from = progress - span / 2
-        if from < 0 { from = 0 }
-        if from + span > duration { from = max(0, duration - span) }
-        return (from, from + span)
+        let from = progress - span / 2
+        return (max(0, from), min(duration, from + span))
     }
 
     // MARK: - playback
@@ -145,8 +142,9 @@ final class Deck: ObservableObject, Identifiable {
     }
 
     func seek(_ seconds: Double) {
-        progress = seconds
-        player.seek(seconds)
+        let clamped = min(max(seconds, 0), player.duration)
+        progress = clamped
+        player.seek(clamped)
     }
 
     func step(_ offset: Int) {
