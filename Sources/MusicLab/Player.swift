@@ -12,12 +12,14 @@ final class Player: ObservableObject {
     private var files: [String: AVAudioFile] = [:]
 
     private var startOffset: Double = 0
+    /// Host time at which the current segment starts rendering — every stem
+    /// node is started at exactly this time, so it anchors the playhead.
+    private var anchorHostTime: UInt64 = 0
     private var fileRate: Double = 44100
     private var fileFrames: AVAudioFramePosition = 0
     private var playGraceUntil = Date.distantPast
     private var cachedLatency: Double = 0
     private var latencyCheck = Date.distantPast
-    private var lastTime: Double = 0
 
     @Published var playing = false
 
@@ -70,12 +72,18 @@ final class Player: ObservableObject {
         AVAudioTime(hostTime: mach_absolute_time() + UInt64(0.1 * Self.ticksPerSecond))
     }
 
-    private func schedule(from seconds: Double) {
+    /// Queue the segment on every stem node and start them all at one shared
+    /// host time. The segment is scheduled at the head of each player's
+    /// timeline and the *player* is started at `when`, so segment start and
+    /// `anchorHostTime` coincide exactly — no dependence on the node's
+    /// sample counter, which is not reliably reset across stop/play.
+    private func schedule(from seconds: Double) -> Bool {
         let startFrame = AVAudioFramePosition(min(max(seconds, 0), duration) * fileRate)
         let remaining = fileFrames - startFrame
-        guard remaining > 0 else { return }
+        guard remaining > 0 else { return false }
         startOffset = Double(startFrame) / fileRate
         let when = startTime()
+        anchorHostTime = when.hostTime
         for (name, player) in players {
             player.stop()
             // no completion handler: with compressed files it can fire when the
@@ -85,16 +93,17 @@ final class Player: ObservableObject {
                 files[name]!,
                 startingFrame: startFrame,
                 frameCount: AVAudioFrameCount(remaining),
-                at: when,
+                at: nil,
                 completionCallbackType: .dataPlayedBack
             ) { _ in }
         }
+        for player in players.values { player.play(at: when) }
+        return true
     }
 
     func play(from seconds: Double = 0) {
         guard !players.isEmpty else { return }
-        schedule(from: min(max(seconds, 0), max(duration - 0.1, 0)))
-        for player in players.values { player.play() }
+        guard schedule(from: min(max(seconds, 0), max(duration - 0.1, 0))) else { return }
         playGraceUntil = Date().addingTimeInterval(0.4)
         playing = true
     }
@@ -109,7 +118,6 @@ final class Player: ObservableObject {
     func stop() {
         for player in players.values { player.stop() }
         startOffset = 0
-        lastTime = 0
         playing = false
     }
 
@@ -203,23 +211,16 @@ final class Player: ObservableObject {
         return total / rate
     }
 
-    /// Where playback currently sits in the file, in seconds: the position at
-    /// the last render timestamp, extrapolated to now, minus the presentation
-    /// latency so it matches what is actually audible.
+    /// Where playback currently sits in the file, in seconds: the segment
+    /// start plus the host time elapsed since the nodes were started, minus
+    /// the presentation latency so it matches what is actually audible.
+    /// Host-clock based, so it is smooth at display rate and cannot jump
+    /// when a node's sample counter carries over from an earlier run.
     var time: Double {
-        guard playing, let player = players.values.first,
-              let renderTime = player.lastRenderTime,
-              let position = player.playerTime(forNodeTime: renderTime)
-        else {
-            // while playing, a failed conversion must not snap the readout
-            // back to startOffset — hold the last known position
-            return playing ? max(lastTime, startOffset) : startOffset
-        }
-        let elapsed = Double(mach_absolute_time()) - Double(renderTime.hostTime)
-        let t = startOffset + Double(position.sampleTime) / position.sampleRate
-            + elapsed / Self.ticksPerSecond - outputLatency
-        lastTime = min(max(t, 0), duration)
-        return lastTime
+        guard playing else { return startOffset }
+        let elapsed = (Double(mach_absolute_time()) - Double(anchorHostTime)) / Self.ticksPerSecond
+            - outputLatency
+        return min(startOffset + max(elapsed, 0), duration)
     }
 
     func setGain(_ stem: String, _ gain: Float) {
